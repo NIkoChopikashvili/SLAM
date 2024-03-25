@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import g2o
 
 
 def slam():
@@ -23,6 +24,11 @@ def slam():
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     kp_map, des_map = None, None
     prev_frame = None
+
+    optimizer = g2o.SparseOptimizer()
+    solver = g2o.BlockSolverSE3(g2o.LinearSolverEigenSE3())
+    solver = g2o.OptimizationAlgorithmLevenberg(solver)
+    optimizer.set_algorithm(solver)
 
     while True:
         ret, frame = cap.read()
@@ -60,11 +66,32 @@ def slam():
         points_4d_homogeneous = cv2.triangulatePoints(P1, P2, pts1, pts2)
         points_3d = cv2.convertPointsFromHomogeneous(points_4d_homogeneous.T)
 
-        if K is not None:
-            criteria = (cv2.TERM_CRITERIA_EPS +
-                        cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            _, _, _, _, _, R, t = cv2.solvePnPRansac(
-                points_3d, pts2, K, None, criteria)
+        # Add camera pose vertices
+        pose = g2o.SE3Quat(R, t)
+        v_se3 = g2o.VertexSE3Expmap()
+        v_se3.set_id(0)
+        v_se3.set_estimate(pose)
+        optimizer.add_vertex(v_se3)
+
+        for i, point in enumerate(points_3d):
+            v_p = g2o.VertexPointXYZ()
+            v_p.set_id(i + 1)
+            v_p.set_estimate(point[0])
+            optimizer.add_vertex(v_p)
+
+        for i, match in enumerate(matches):
+            edge = g2o.EdgeProjectXYZ2UV()
+            edge.set_vertex(0, v_se3)
+            edge.set_vertex(1, optimizer.vertex(i + 1))
+            edge.set_measurement(pts2[i].reshape(-1))
+            edge.set_information(np.eye(2))
+            optimizer.add_edge(edge)
+
+        optimizer.initialize_optimization()
+        optimizer.optimize(30)
+
+        pose = v_se3.estimate()
+        R, t = pose.rotation(), pose.translation()
 
         for point in points_3d:
             x, y, z = point[0]
